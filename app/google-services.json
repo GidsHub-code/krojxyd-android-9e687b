@@ -26,6 +26,25 @@
     },
     {
       "client_info": {
+        "mobilesdk_app_id": "1:137134007743:android:5f31e20f9e1b91cfe52d0a",
+        "android_client_info": {
+          "package_name": "co.median.android.krojxyd"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAmL012QLrTHGbYfkGjbZgd6m8o2h4Hpis"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
         "mobilesdk_app_id": "1:137134007743:android:cadf9b45e117a7eee52d0a",
         "android_client_info": {
           "package_name": "signalme.pro"
