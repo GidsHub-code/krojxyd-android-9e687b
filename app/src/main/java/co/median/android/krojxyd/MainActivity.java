@@ -133,7 +133,9 @@ public class MainActivity extends AppCompatActivity {
                 if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
                 fileChooserCallback = filePathCallback;
                 Intent intent = params.createIntent();
-
+                // Force uploads to image/*, video/* only (configured in Git2App)
+                intent.setType("*/*");
+                intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "image/*", "video/*" });
                 try {
                     fileChooserLauncher.launch(intent);
                     return true;
