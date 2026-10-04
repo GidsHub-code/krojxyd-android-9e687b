@@ -36,6 +36,9 @@ public class MainActivity extends AppCompatActivity {
     private int downloadNotifId = 9000;
     private ValueCallback<Uri[]> fileChooserCallback;
     private ActivityResultLauncher<Intent> fileChooserLauncher;
+    // Output URIs for photos/videos captured with the camera from the upload chooser
+    private Uri pendingCameraPhotoUri;
+    private Uri pendingCameraVideoUri;
     private PermissionRequest pendingWebPermissionRequest;
 
     // Pending download details (queued while rewarded ad is shown)
@@ -132,16 +135,64 @@ public class MainActivity extends AppCompatActivity {
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> filePathCallback, FileChooserParams params) {
                 if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
                 fileChooserCallback = filePathCallback;
-                Intent intent = params.createIntent();
-                // Force uploads to image/*, video/* only (configured in Git2App)
-                intent.setType("*/*");
-                intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "image/*", "video/*" });
+                pendingCameraPhotoUri = null;
+                pendingCameraVideoUri = null;
                 try {
-                    fileChooserLauncher.launch(intent);
+                    // Honour what the page asked for (<input accept="...">); default to photos + videos.
+                    java.util.ArrayList<String> types = new java.util.ArrayList<>();
+                    String[] accept = params.getAcceptTypes();
+                    if (accept != null) {
+                        for (String a : accept) {
+                            if (a == null) continue;
+                            for (String part : a.split(",")) {
+                                part = part.trim();
+                                // Only real MIME types; extensions like ".jpg" can't go in EXTRA_MIME_TYPES
+                                if (part.contains("/")) types.add(part);
+                            }
+                        }
+                    }
+                    if (types.isEmpty()) {
+                        types.add("image/*");
+                        types.add("video/*");
+                    }
+
+                    Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
+                    pick.addCategory(Intent.CATEGORY_OPENABLE);
+                    pick.setType(types.size() == 1 ? types.get(0) : "*/*");
+                    if (types.size() > 1) pick.putExtra(Intent.EXTRA_MIME_TYPES, types.toArray(new String[0]));
+                    if (params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE) {
+                        pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                    }
+
+                    // Offer "take photo" / "record video" next to the gallery picker.
+                    // (Camera intents throw SecurityException if CAMERA is declared but not granted.)
+                    java.util.ArrayList<Intent> extras = new java.util.ArrayList<>();
+                    if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                        boolean wantsImage = false, wantsVideo = false;
+                        for (String t : types) {
+                            if (t.startsWith("image/") || t.equals("*/*")) wantsImage = true;
+                            if (t.startsWith("video/") || t.equals("*/*")) wantsVideo = true;
+                        }
+                        if (wantsImage) {
+                            Intent photo = buildCameraIntent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE, ".jpg", true);
+                            if (photo != null) extras.add(photo);
+                        }
+                        if (wantsVideo) {
+                            Intent video = buildCameraIntent(android.provider.MediaStore.ACTION_VIDEO_CAPTURE, ".mp4", false);
+                            if (video != null) extras.add(video);
+                        }
+                    }
+
+                    Intent chooser = Intent.createChooser(pick, "Select photos or videos");
+                    if (!extras.isEmpty()) {
+                        chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, extras.toArray(new Intent[0]));
+                    }
+                    fileChooserLauncher.launch(chooser);
                     return true;
                 } catch (Exception e) {
+                    if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
                     fileChooserCallback = null;
-                    return false;
+                    return true;
                 }
             }
 
@@ -242,16 +293,55 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
+    private Intent buildCameraIntent(String action, String suffix, boolean isPhoto) {
+        try {
+            java.io.File dir = new java.io.File(getCacheDir(), "uploads");
+            if (!dir.exists()) dir.mkdirs();
+            java.io.File f = java.io.File.createTempFile("capture_", suffix, dir);
+            Uri uri = androidx.core.content.FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", f);
+            Intent i = new Intent(action);
+            i.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri);
+            i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            if (i.resolveActivity(getPackageManager()) == null) return null;
+            if (isPhoto) pendingCameraPhotoUri = uri; else pendingCameraVideoUri = uri;
+            return i;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private void registerFileChooser() {
         fileChooserLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> {
                 if (fileChooserCallback == null) return;
-                Uri[] uris = WebChromeClient.FileChooserParams.parseResult(result.getResultCode(), result.getData());
+                Uri[] uris = null;
+                if (result.getResultCode() == RESULT_OK) {
+                    Intent data = result.getData();
+                    uris = WebChromeClient.FileChooserParams.parseResult(result.getResultCode(), data);
+                    if (uris == null || uris.length == 0) {
+                        // Camera apps write to our EXTRA_OUTPUT uri and often return no data
+                        Uri captured = null;
+                        if (data != null && data.getData() != null) captured = data.getData();
+                        else if (pendingCameraVideoUri != null && fileHasContent(pendingCameraVideoUri)) captured = pendingCameraVideoUri;
+                        else if (pendingCameraPhotoUri != null && fileHasContent(pendingCameraPhotoUri)) captured = pendingCameraPhotoUri;
+                        if (captured != null) uris = new Uri[] { captured };
+                    }
+                }
                 fileChooserCallback.onReceiveValue(uris);
                 fileChooserCallback = null;
+                pendingCameraPhotoUri = null;
+                pendingCameraVideoUri = null;
             }
         );
+    }
+
+    private boolean fileHasContent(Uri uri) {
+        try (android.content.res.AssetFileDescriptor fd = getContentResolver().openAssetFileDescriptor(uri, "r")) {
+            return fd != null && fd.getLength() > 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void createNotificationChannel() {
