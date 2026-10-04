@@ -133,6 +133,8 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> filePathCallback, FileChooserParams params) {
+                // DIAGNOSTIC (remove once uploads are confirmed working): proves the page asked for a file picker
+                android.widget.Toast.makeText(MainActivity.this, "Upload requested by page - opening picker", android.widget.Toast.LENGTH_SHORT).show();
                 if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
                 fileChooserCallback = filePathCallback;
                 pendingCameraPhotoUri = null;
@@ -190,6 +192,7 @@ public class MainActivity extends AppCompatActivity {
                     fileChooserLauncher.launch(chooser);
                     return true;
                 } catch (Exception e) {
+                    android.widget.Toast.makeText(MainActivity.this, "Could not open picker: " + e, android.widget.Toast.LENGTH_LONG).show();
                     if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
                     fileChooserCallback = null;
                     return true;
