@@ -90,6 +90,7 @@ public class MainActivity extends AppCompatActivity {
         createDownloadNotificationChannel();
         requestRuntimePermissions();
         registerFileChooser();
+        cleanOldUploads();
 
 
         // JS bridge so blob:/data: downloads can be handed to native code
@@ -133,8 +134,6 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> filePathCallback, FileChooserParams params) {
-                // DIAGNOSTIC (remove once uploads are confirmed working): proves the page asked for a file picker
-                android.widget.Toast.makeText(MainActivity.this, "Upload requested by page - opening picker", android.widget.Toast.LENGTH_SHORT).show();
                 if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
                 fileChooserCallback = filePathCallback;
                 pendingCameraPhotoUri = null;
@@ -317,7 +316,14 @@ public class MainActivity extends AppCompatActivity {
         fileChooserLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> {
-                if (fileChooserCallback == null) return;
+                final ValueCallback<Uri[]> cb = fileChooserCallback;
+                if (cb == null) return;
+                fileChooserCallback = null;
+                final Uri photoOut = pendingCameraPhotoUri;
+                final Uri videoOut = pendingCameraVideoUri;
+                pendingCameraPhotoUri = null;
+                pendingCameraVideoUri = null;
+
                 Uri[] uris = null;
                 if (result.getResultCode() == RESULT_OK) {
                     Intent data = result.getData();
@@ -326,17 +332,91 @@ public class MainActivity extends AppCompatActivity {
                         // Camera apps write to our EXTRA_OUTPUT uri and often return no data
                         Uri captured = null;
                         if (data != null && data.getData() != null) captured = data.getData();
-                        else if (pendingCameraVideoUri != null && fileHasContent(pendingCameraVideoUri)) captured = pendingCameraVideoUri;
-                        else if (pendingCameraPhotoUri != null && fileHasContent(pendingCameraPhotoUri)) captured = pendingCameraPhotoUri;
+                        else if (videoOut != null && fileHasContent(videoOut)) captured = videoOut;
+                        else if (photoOut != null && fileHasContent(photoOut)) captured = photoOut;
                         if (captured != null) uris = new Uri[] { captured };
                     }
                 }
-                fileChooserCallback.onReceiveValue(uris);
-                fileChooserCallback = null;
-                pendingCameraPhotoUri = null;
-                pendingCameraVideoUri = null;
+                if (uris == null || uris.length == 0) {
+                    cb.onReceiveValue(null);
+                    return;
+                }
+
+                // Gallery/Files picks are temporary content:// links owned by another app. The page
+                // reads them later (when the agent submits the listing) and by then access can be gone,
+                // so the upload silently fails. Copy each pick into our own cache first (off the UI
+                // thread - videos can be large) and hand the WebView our own FileProvider URIs.
+                final Uri[] picked = uris;
+                boolean needsCopy = false;
+                for (Uri u : picked) if (!isOwnUri(u)) { needsCopy = true; break; }
+                if (needsCopy) {
+                    android.widget.Toast.makeText(this, "Preparing files...", android.widget.Toast.LENGTH_SHORT).show();
+                }
+                new Thread(() -> {
+                    final Uri[] out = new Uri[picked.length];
+                    for (int i = 0; i < picked.length; i++) out[i] = copyToAppCache(picked[i]);
+                    runOnUiThread(() -> cb.onReceiveValue(out));
+                }).start();
             }
         );
+    }
+
+    private boolean isOwnUri(Uri u) {
+        return u != null && (getPackageName() + ".fileprovider").equals(u.getAuthority());
+    }
+
+    private String queryDisplayName(Uri uri) {
+        try (android.database.Cursor c = getContentResolver().query(uri, new String[] { android.provider.OpenableColumns.DISPLAY_NAME }, null, null, null)) {
+            if (c != null && c.moveToFirst()) return c.getString(0);
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    /** Copies a picked content:// file into cache/uploads and returns a FileProvider URI for it (or the original on any failure). */
+    private Uri copyToAppCache(Uri src) {
+        if (src == null || isOwnUri(src) || !"content".equals(src.getScheme())) return src;
+        java.io.File out = null;
+        try {
+            String mime = getContentResolver().getType(src);
+            String name = queryDisplayName(src);
+            if (name == null || name.trim().isEmpty()) name = "upload";
+            name = name.replaceAll("[^A-Za-z0-9._-]", "_");
+            if (name.length() > 80) name = name.substring(name.length() - 80);
+            if (name.indexOf('.') < 0 && mime != null) {
+                String ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime);
+                if (ext != null) name = name + "." + ext;
+            }
+            java.io.File dir = new java.io.File(getCacheDir(), "uploads/" + System.nanoTime());
+            if (!dir.mkdirs()) return src;
+            out = new java.io.File(dir, name);
+            try (java.io.InputStream in = getContentResolver().openInputStream(src);
+                 java.io.OutputStream os = new java.io.FileOutputStream(out)) {
+                if (in == null) { out.delete(); return src; }
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+            }
+            return androidx.core.content.FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", out);
+        } catch (Throwable t) {
+            if (out != null) out.delete();
+            return src;
+        }
+    }
+
+    /** Delete picked/captured upload copies older than a day. */
+    private void cleanOldUploads() {
+        new Thread(() -> {
+            try {
+                deleteOld(new java.io.File(getCacheDir(), "uploads"), System.currentTimeMillis() - 24L * 60 * 60 * 1000);
+            } catch (Throwable ignored) {}
+        }).start();
+    }
+
+    private void deleteOld(java.io.File f, long cutoff) {
+        if (f == null || !f.exists()) return;
+        java.io.File[] kids = f.listFiles();
+        if (kids != null) for (java.io.File k : kids) deleteOld(k, cutoff);
+        if (!f.getName().equals("uploads") && f.lastModified() < cutoff) f.delete();
     }
 
     private boolean fileHasContent(Uri uri) {
