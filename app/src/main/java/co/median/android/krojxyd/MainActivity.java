@@ -1,4 +1,4 @@
-package co.median.android.krojxyd;
+package signalme.pl;
 
 
 import android.Manifest;
