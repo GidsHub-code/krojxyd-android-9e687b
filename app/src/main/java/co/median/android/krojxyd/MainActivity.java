@@ -156,44 +156,12 @@ public class MainActivity extends AppCompatActivity {
                         types.add("image/*");
                         types.add("video/*");
                     }
-
-                    Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
-                    pick.addCategory(Intent.CATEGORY_OPENABLE);
-                    pick.setType(types.size() == 1 ? types.get(0) : "*/*");
-                    if (types.size() > 1) pick.putExtra(Intent.EXTRA_MIME_TYPES, types.toArray(new String[0]));
-                    if (params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE) {
-                        pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-                    }
-
-                    // Offer "take photo" / "record video" next to the gallery picker.
-                    // (Camera intents throw SecurityException if CAMERA is declared but not granted.)
-                    java.util.ArrayList<Intent> extras = new java.util.ArrayList<>();
-                    if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                        boolean wantsImage = false, wantsVideo = false;
-                        for (String t : types) {
-                            if (t.startsWith("image/") || t.equals("*/*")) wantsImage = true;
-                            if (t.startsWith("video/") || t.equals("*/*")) wantsVideo = true;
-                        }
-                        if (wantsImage) {
-                            Intent photo = buildCameraIntent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE, ".jpg", true);
-                            if (photo != null) extras.add(photo);
-                        }
-                        if (wantsVideo) {
-                            Intent video = buildCameraIntent(android.provider.MediaStore.ACTION_VIDEO_CAPTURE, ".mp4", false);
-                            if (video != null) extras.add(video);
-                        }
-                    }
-
-                    Intent chooser = Intent.createChooser(pick, "Select photos or videos");
-                    if (!extras.isEmpty()) {
-                        chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, extras.toArray(new Intent[0]));
-                    }
-                    fileChooserLauncher.launch(chooser);
+                    boolean multiple = params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE;
+                    showMediaSourceDialog(types, multiple);
                     return true;
                 } catch (Exception e) {
                     android.widget.Toast.makeText(MainActivity.this, "Could not open picker: " + e, android.widget.Toast.LENGTH_LONG).show();
-                    if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
-                    fileChooserCallback = null;
+                    cancelFileChooser();
                     return true;
                 }
             }
@@ -312,32 +280,156 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void cancelFileChooser() {
+        ValueCallback<Uri[]> cb = fileChooserCallback;
+        fileChooserCallback = null;
+        pendingCameraPhotoUri = null;
+        pendingCameraVideoUri = null;
+        if (cb != null) cb.onReceiveValue(null);
+    }
+
+    private static boolean typesInclude(java.util.List<String> types, String prefix) {
+        for (String t : types) {
+            if (t.startsWith(prefix) || t.equals("*/*")) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Instead of the system app-chooser (which behaves differently on every phone brand), show our own
+     * short list of sources. Each one reaches the files by a different route, so if one misbehaves on a
+     * given phone another still works.
+     */
+    private void showMediaSourceDialog(final java.util.List<String> types, final boolean multiple) {
+        final boolean wantsImage = typesInclude(types, "image/");
+        final boolean wantsVideo = typesInclude(types, "video/");
+        final boolean cameraOk = checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+
+        final java.util.ArrayList<String> labels = new java.util.ArrayList<>();
+        final java.util.ArrayList<Runnable> actions = new java.util.ArrayList<>();
+
+        if (cameraOk && wantsImage) {
+            labels.add("Take a photo");
+            actions.add(() -> launchPicker(buildCameraIntent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE, ".jpg", true)));
+        }
+        if (cameraOk && wantsVideo) {
+            labels.add("Record a video");
+            actions.add(() -> launchPicker(buildCameraIntent(android.provider.MediaStore.ACTION_VIDEO_CAPTURE, ".mp4", false)));
+        }
+        labels.add(wantsImage && wantsVideo ? "Choose photos / videos from gallery" : (wantsVideo ? "Choose videos from gallery" : "Choose photos from gallery"));
+        actions.add(() -> launchPicker(buildGalleryIntent(types, multiple)));
+        labels.add("Browse files");
+        actions.add(() -> launchPicker(buildDocumentsIntent(types, multiple)));
+
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Add photos or videos")
+            .setItems(labels.toArray(new String[0]), (dialog, which) -> actions.get(which).run())
+            .setOnCancelListener(dialog -> cancelFileChooser())
+            .show();
+    }
+
+    private Intent buildGalleryIntent(java.util.List<String> types, boolean multiple) {
+        boolean img = typesInclude(types, "image/");
+        boolean vid = typesInclude(types, "video/");
+        if (Build.VERSION.SDK_INT >= 33) {
+            // System Photo Picker: no storage permission needed, works the same on every phone.
+            Intent i = new Intent(android.provider.MediaStore.ACTION_PICK_IMAGES);
+            if (img && !vid) i.setType("image/*");
+            else if (vid && !img) i.setType("video/*");
+            if (multiple) {
+                int max = Math.min(android.provider.MediaStore.getPickImagesMaxLimit(), 12);
+                if (max > 1) i.putExtra(android.provider.MediaStore.EXTRA_PICK_IMAGES_MAX, max);
+            }
+            return i;
+        }
+        Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        if (img && !vid) i.setType("image/*");
+        else if (vid && !img) i.setType("video/*");
+        else {
+            i.setType("*/*");
+            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "image/*", "video/*" });
+        }
+        if (multiple) i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        return i;
+    }
+
+    private Intent buildDocumentsIntent(java.util.List<String> types, boolean multiple) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, types.toArray(new String[0]));
+        if (multiple) i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        return i;
+    }
+
+    private void launchPicker(Intent intent) {
+        if (intent == null) {
+            android.widget.Toast.makeText(this, "This option is not available on this phone", android.widget.Toast.LENGTH_LONG).show();
+            cancelFileChooser();
+            return;
+        }
+        try {
+            fileChooserLauncher.launch(intent);
+        } catch (Exception e) {
+            android.widget.Toast.makeText(this, "Could not open picker: " + e.getClass().getSimpleName(), android.widget.Toast.LENGTH_LONG).show();
+            cancelFileChooser();
+        }
+    }
+
+    /** Collect every Uri a picker may have returned: ClipData, data, or EXTRA_STREAM. */
+    private java.util.List<Uri> extractUris(Intent data) {
+        java.util.LinkedHashSet<Uri> set = new java.util.LinkedHashSet<>();
+        if (data == null) return new java.util.ArrayList<>();
+        android.content.ClipData cd = data.getClipData();
+        if (cd != null) {
+            for (int i = 0; i < cd.getItemCount(); i++) {
+                Uri u = cd.getItemAt(i).getUri();
+                if (u != null) set.add(u);
+            }
+        }
+        if (data.getData() != null) set.add(data.getData());
+        try {
+            Object one = data.getExtras() != null ? data.getExtras().get(Intent.EXTRA_STREAM) : null;
+            if (one instanceof Uri) set.add((Uri) one);
+            else if (one instanceof java.util.List) {
+                for (Object o : (java.util.List<?>) one) if (o instanceof Uri) set.add((Uri) o);
+            }
+        } catch (Throwable ignored) {}
+        return new java.util.ArrayList<>(set);
+    }
+
     private void registerFileChooser() {
         fileChooserLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> {
                 final ValueCallback<Uri[]> cb = fileChooserCallback;
-                if (cb == null) return;
-                fileChooserCallback = null;
                 final Uri photoOut = pendingCameraPhotoUri;
                 final Uri videoOut = pendingCameraVideoUri;
+                fileChooserCallback = null;
                 pendingCameraPhotoUri = null;
                 pendingCameraVideoUri = null;
-
-                Uri[] uris = null;
-                if (result.getResultCode() == RESULT_OK) {
-                    Intent data = result.getData();
-                    uris = WebChromeClient.FileChooserParams.parseResult(result.getResultCode(), data);
-                    if (uris == null || uris.length == 0) {
-                        // Camera apps write to our EXTRA_OUTPUT uri and often return no data
-                        Uri captured = null;
-                        if (data != null && data.getData() != null) captured = data.getData();
-                        else if (videoOut != null && fileHasContent(videoOut)) captured = videoOut;
-                        else if (photoOut != null && fileHasContent(photoOut)) captured = photoOut;
-                        if (captured != null) uris = new Uri[] { captured };
+                if (cb == null) {
+                    // The app was restarted by Android while the picker was open, so the page's request is gone.
+                    if (result.getResultCode() == RESULT_OK) {
+                        android.widget.Toast.makeText(this, "Please tap Add photos / Add videos again", android.widget.Toast.LENGTH_LONG).show();
                     }
+                    return;
                 }
-                if (uris == null || uris.length == 0) {
+                if (result.getResultCode() != RESULT_OK) {
+                    cb.onReceiveValue(null);
+                    return;
+                }
+
+                Intent data = result.getData();
+                java.util.List<Uri> list = extractUris(data);
+                if (list.isEmpty()) {
+                    // Camera apps write to our EXTRA_OUTPUT uri and often return no data
+                    if (videoOut != null && fileHasContent(videoOut)) list.add(videoOut);
+                    else if (photoOut != null && fileHasContent(photoOut)) list.add(photoOut);
+                }
+                if (list.isEmpty()) {
+                    android.widget.Toast.makeText(this, "The picker did not return any file. Please try another option.", android.widget.Toast.LENGTH_LONG).show();
                     cb.onReceiveValue(null);
                     return;
                 }
@@ -346,7 +438,7 @@ public class MainActivity extends AppCompatActivity {
                 // reads them later (when the agent submits the listing) and by then access can be gone,
                 // so the upload silently fails. Copy each pick into our own cache first (off the UI
                 // thread - videos can be large) and hand the WebView our own FileProvider URIs.
-                final Uri[] picked = uris;
+                final Uri[] picked = list.toArray(new Uri[0]);
                 boolean needsCopy = false;
                 for (Uri u : picked) if (!isOwnUri(u)) { needsCopy = true; break; }
                 if (needsCopy) {
@@ -354,8 +446,18 @@ public class MainActivity extends AppCompatActivity {
                 }
                 new Thread(() -> {
                     final Uri[] out = new Uri[picked.length];
-                    for (int i = 0; i < picked.length; i++) out[i] = copyToAppCache(picked[i]);
-                    runOnUiThread(() -> cb.onReceiveValue(out));
+                    int failed = 0;
+                    for (int i = 0; i < picked.length; i++) {
+                        out[i] = copyToAppCache(picked[i]);
+                        if (!isOwnUri(out[i])) failed++;
+                    }
+                    final int notCached = failed;
+                    runOnUiThread(() -> {
+                        String msg = "Added " + out.length + (out.length == 1 ? " file" : " files");
+                        if (notCached > 0) msg += " (" + notCached + " could not be copied, sent directly)";
+                        android.widget.Toast.makeText(MainActivity.this, msg, android.widget.Toast.LENGTH_SHORT).show();
+                        cb.onReceiveValue(out);
+                    });
                 }).start();
             }
         );
