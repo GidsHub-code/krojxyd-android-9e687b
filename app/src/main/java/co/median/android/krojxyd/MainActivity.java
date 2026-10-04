@@ -396,10 +396,86 @@ public class MainActivity extends AppCompatActivity {
                 int n;
                 while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
             }
+            out = shrinkImageIfNeeded(out, mime);
             return androidx.core.content.FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", out);
         } catch (Throwable t) {
             if (out != null) out.delete();
             return src;
+        }
+    }
+
+    /**
+     * The listing form rejects photos over 8MB, and modern phone cameras (50MP+) routinely
+     * produce 5-15MB JPEGs. Big photos are also slow to upload on mobile data. So gallery photos
+     * larger than ~2MB or wider than 2560px are re-encoded as JPEG (max 2560px, quality 85,
+     * EXIF rotation applied). Any failure returns the untouched original file.
+     */
+    private java.io.File shrinkImageIfNeeded(java.io.File f, String mime) {
+        try {
+            String lower = f.getName().toLowerCase(java.util.Locale.ROOT);
+            boolean isImage = (mime != null && mime.startsWith("image/"))
+                || lower.matches(".*\\.(jpe?g|png|webp|heic|heif|bmp)$");
+            if (!isImage || (mime != null && mime.contains("gif")) || lower.endsWith(".gif")) return f;
+
+            final int MAX_SIDE = 2560;
+            android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeFile(f.getAbsolutePath(), bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return f;
+            int longest = Math.max(bounds.outWidth, bounds.outHeight);
+            if (longest <= MAX_SIDE && f.length() <= 2L * 1024 * 1024) return f;
+
+            int sample = 1;
+            while (longest / (sample * 2) >= MAX_SIDE) sample *= 2;
+            android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
+            opts.inSampleSize = sample;
+            android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeFile(f.getAbsolutePath(), opts);
+            if (bmp == null) return f;
+
+            int degrees = 0;
+            try {
+                android.media.ExifInterface exif = new android.media.ExifInterface(f.getAbsolutePath());
+                int o = exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, android.media.ExifInterface.ORIENTATION_NORMAL);
+                if (o == android.media.ExifInterface.ORIENTATION_ROTATE_90) degrees = 90;
+                else if (o == android.media.ExifInterface.ORIENTATION_ROTATE_180) degrees = 180;
+                else if (o == android.media.ExifInterface.ORIENTATION_ROTATE_270) degrees = 270;
+            } catch (Throwable ignored) {}
+
+            float scale = Math.min(1f, (float) MAX_SIDE / Math.max(bmp.getWidth(), bmp.getHeight()));
+            android.graphics.Bitmap work = bmp;
+            if (scale < 1f || degrees != 0) {
+                android.graphics.Matrix m = new android.graphics.Matrix();
+                if (scale < 1f) m.postScale(scale, scale);
+                if (degrees != 0) m.postRotate(degrees);
+                work = android.graphics.Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), m, true);
+                if (work != bmp) bmp.recycle();
+            }
+            if (work.hasAlpha()) {
+                // JPEG has no transparency - flatten onto white instead of black
+                android.graphics.Bitmap flat = android.graphics.Bitmap.createBitmap(work.getWidth(), work.getHeight(), android.graphics.Bitmap.Config.ARGB_8888);
+                android.graphics.Canvas c = new android.graphics.Canvas(flat);
+                c.drawColor(android.graphics.Color.WHITE);
+                c.drawBitmap(work, 0, 0, null);
+                work.recycle();
+                work = flat;
+            }
+
+            String base = f.getName();
+            int dot = base.lastIndexOf('.');
+            if (dot > 0) base = base.substring(0, dot);
+            java.io.File tmp = new java.io.File(f.getParentFile(), base + ".tmp");
+            try (java.io.OutputStream os = new java.io.FileOutputStream(tmp)) {
+                work.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, os);
+            }
+            work.recycle();
+            if (tmp.length() == 0) { tmp.delete(); return f; }
+            java.io.File jpg = new java.io.File(f.getParentFile(), base + ".jpg");
+            if (!f.getAbsolutePath().equals(jpg.getAbsolutePath())) f.delete();
+            else jpg.delete();
+            if (!tmp.renameTo(jpg)) return f.exists() ? f : tmp;
+            return jpg;
+        } catch (Throwable t) {
+            return f;
         }
     }
 
