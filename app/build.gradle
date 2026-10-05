@@ -12,12 +12,12 @@ def hasReleaseSigning = System.getenv("KEYSTORE_PATH") && System.getenv("KEYSTOR
 
 android {
     namespace "signalme.pl"
-    compileSdk 35
+    compileSdk 36
 
     defaultConfig {
         applicationId "signalme.pl"
         minSdk 23
-        targetSdk 35
+        targetSdk 36
         versionCode 9
         versionName "4.9"
 
