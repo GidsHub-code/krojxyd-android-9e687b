@@ -1,82 +1,118 @@
-plugins {
-    id 'com.android.application'
-}
+name: Build Android App
 
-// Apply google-services plugin only if google-services.json is provided.
-def googleServicesJson = file('google-services.json')
-if (googleServicesJson.exists()) {
-    apply plugin: 'com.google.gms.google-services'
-}
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-def hasReleaseSigning = System.getenv("KEYSTORE_PATH") && System.getenv("KEYSTORE_PASSWORD") && System.getenv("KEY_ALIAS") && System.getenv("KEY_PASSWORD")
+permissions:
+  contents: read
 
-android {
-    namespace "signalme.pl"
-    compileSdk 35
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
-    defaultConfig {
-        applicationId "signalme.pl"
-        minSdk 23
-        targetSdk 35
-        versionCode 9
-        versionName "4.9"
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
 
-        manifestPlaceholders = [
-            hostName: "signalmep2-abaad358.nnadigideon20.workers.dev",
-            defaultUrl: "https://signalmep2-abaad358.nnadigideon20.workers.dev/",
-            admobAppId: ""
-        ]
-    }
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-    signingConfigs {
-        release {
-            if (hasReleaseSigning) {
-                storeFile file(System.getenv("KEYSTORE_PATH"))
-                storePassword System.getenv("KEYSTORE_PASSWORD")
-                keyAlias System.getenv("KEY_ALIAS")
-                keyPassword System.getenv("KEY_PASSWORD")
-                storeType System.getenv("KEYSTORE_TYPE") ?: "PKCS12"
-            }
-        }
-    }
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
-    buildTypes {
-        debug {
-            versionNameSuffix "-debug"
-        }
-        release {
-            minifyEnabled false
-            if (hasReleaseSigning) {
-                signingConfig signingConfigs.release
-            }
-        }
-    }
+      - name: Install required SDK packages
+        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-}
+      - name: Prepare Gradle
+        run: |
+          chmod +x gradlew
+          ./gradlew --version
 
-configurations.all {
-    resolutionStrategy {
-        force 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
-        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.24'
-        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.24'
-        force 'org.jetbrains.kotlin:kotlin-stdlib-common:1.9.24'
-    }
-}
+      - name: Write google-services.json (enables Firebase Cloud Messaging)
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
+            echo "GOOGLE_SERVICES_JSON secret not set — FCM push will be disabled in this build."
+            echo "Add it (raw JSON or base64) in repo Settings → Secrets and variables → Actions to enable push."
+            exit 0
+          fi
+          # Accept either raw JSON or base64-encoded JSON
+          if printf '%s' "$GOOGLE_SERVICES_JSON" | head -c 1 | grep -q '{'; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+          else
+            printf '%s' "$GOOGLE_SERVICES_JSON" | base64 --decode > app/google-services.json
+          fi
+          echo "google-services.json written ($(wc -c < app/google-services.json) bytes) — Firebase plugin will activate."
 
-dependencies {
-    implementation 'androidx.appcompat:appcompat:1.7.0'
-    implementation 'androidx.webkit:webkit:1.12.1'
-    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
-    implementation 'androidx.localbroadcastmanager:localbroadcastmanager:1.1.0'
-    implementation 'androidx.core:core:1.13.1'
-    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
+      - name: Validate FCM server key (FCM_SERVICE_ACCOUNT_JSON) — never bundled into the app
+        env:
+          FCM_SERVICE_ACCOUNT_JSON: ${{ secrets.FCM_SERVICE_ACCOUNT_JSON }}
+        run: |
+          # SECURITY: FCM_SERVICE_ACCOUNT_JSON is a Google service-account PRIVATE key.
+          # It is used by your *backend* (e.g. signalme.pro) to SEND pushes via the
+          # FCM HTTP v1 API. It must NEVER be embedded inside the APK/AAB — anyone
+          # could extract it and impersonate your backend. This step only validates
+          # it and then deletes it from the runner.
+          if [ -z "$FCM_SERVICE_ACCOUNT_JSON" ]; then
+            echo "FCM_SERVICE_ACCOUNT_JSON not set — fine for the app build."
+            echo "Add it to your push-sending backend instead (signalme.pro)."
+          else
+            TMP_SA="$RUNNER_TEMP/fcm-service-account.json"
+            # Trim whitespace/newlines — GitHub secrets often carry them
+            CLEAN="$(printf '%s' "$FCM_SERVICE_ACCOUNT_JSON" | tr -d '[:space:]')"
+            if printf '%s' "$CLEAN" | head -c 1 | grep -q '{'; then
+              printf '%s' "$FCM_SERVICE_ACCOUNT_JSON" > "$TMP_SA"
+            else
+              printf '%s' "$CLEAN" | base64 --decode > "$TMP_SA" 2>/dev/null || {
+                echo "::error::FCM_SERVICE_ACCOUNT_JSON is neither plain JSON nor valid base64."
+                echo "Paste the raw service-account JSON (starts with {) as the secret value."
+                exit 1
+              }
+            fi
+            python3 - "$TMP_SA" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as f: sa = json.load(f)
+          required = ["type","project_id","private_key","client_email","token_uri"]
+          missing = [k for k in required if k not in sa]
+          if missing:
+              print("::error::FCM_SERVICE_ACCOUNT_JSON missing keys: " + ", ".join(missing)); sys.exit(1)
+          if sa.get("type") != "service_account":
+              print("::error::FCM_SERVICE_ACCOUNT_JSON is not a service_account key"); sys.exit(1)
+          print("FCM service account OK — project_id=" + sa["project_id"])
+          PY
+            shred -u "$TMP_SA" 2>/dev/null || rm -f "$TMP_SA"
+            echo "Validated. Key was NOT bundled into the APK/AAB."
+          fi
 
-    // Firebase Cloud Messaging (in-app + system tray push)
-    implementation platform('com.google.firebase:firebase-bom:33.5.1')
-    implementation 'com.google.firebase:firebase-messaging'
+      - name: Build signed release APK and AAB
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::Release signing secrets are missing. Add KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD in repo Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/git2app-release.jks"
+          export KEYSTORE_PATH="$RUNNER_TEMP/git2app-release.jks"
+          ./gradlew --no-daemon assembleRelease bundleRelease --stacktrace
 
-}
+      - name: Upload signed release APK and AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-release-apk-aab
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
