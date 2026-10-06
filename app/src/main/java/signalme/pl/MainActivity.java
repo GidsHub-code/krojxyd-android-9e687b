@@ -88,7 +88,11 @@ public class MainActivity extends AppCompatActivity {
         // Draw edge to edge and apply the system-bar / keyboard insets ourselves so
         // we can drop them while the payment checkout is open (see applyCheckoutFullscreen).
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-        rootView = findViewById(R.id.root);
+        // The root layout is the parent of the pull-to-refresh view. Looked up this way (not via
+        // R.id.root) so the build works whether or not activity_main.xml has been updated.
+        View refreshView = findViewById(R.id.refresh);
+        rootView = (View) refreshView.getParent();
+        rootView.setFitsSystemWindows(false);
         ViewCompat.setOnApplyWindowInsetsListener(rootView, (v, insets) -> {
             Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
             Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
