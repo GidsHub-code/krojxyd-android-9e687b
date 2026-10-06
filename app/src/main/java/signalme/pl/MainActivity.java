@@ -24,6 +24,11 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 public class MainActivity extends AppCompatActivity {
@@ -40,6 +45,9 @@ public class MainActivity extends AppCompatActivity {
     private Uri pendingCameraPhotoUri;
     private Uri pendingCameraVideoUri;
     private PermissionRequest pendingWebPermissionRequest;
+    // True while the Paystack checkout is open: system bars hidden, WebView edge to edge.
+    private boolean checkoutFullscreen = false;
+    private View rootView;
 
     // Pending download details (queued while rewarded ad is shown)
     private String pendingDlUrl;
@@ -77,13 +85,28 @@ public class MainActivity extends AppCompatActivity {
             decor.setSystemUiVisibility(flags);
         } catch (Throwable ignored) {}
         setContentView(R.layout.activity_main);
+        // Draw edge to edge and apply the system-bar / keyboard insets ourselves so
+        // we can drop them while the payment checkout is open (see applyCheckoutFullscreen).
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        rootView = findViewById(R.id.root);
+        ViewCompat.setOnApplyWindowInsetsListener(rootView, (v, insets) -> {
+            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
+            if (checkoutFullscreen) {
+                Insets cut = insets.getInsets(WindowInsetsCompat.Type.displayCutout());
+                v.setPadding(cut.left, cut.top, cut.right, Math.max(cut.bottom, ime.bottom));
+            } else {
+                v.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
+            }
+            return WindowInsetsCompat.CONSUMED;
+        });
         refreshLayout = findViewById(R.id.refresh);
         webView = findViewById(R.id.webview);
         // Only trigger pull-to-refresh when the WebView is actually at the top,
         // so normal scrolling never gets hijacked into a reload.
         refreshLayout.setOnRefreshListener(() -> webView.reload());
         webView.getViewTreeObserver().addOnScrollChangedListener(() -> {
-            refreshLayout.setEnabled(webView.getScrollY() == 0);
+            refreshLayout.setEnabled(!checkoutFullscreen && webView.getScrollY() == 0);
         });
 
         createNotificationChannel();
@@ -95,6 +118,8 @@ public class MainActivity extends AppCompatActivity {
 
         // JS bridge so blob:/data: downloads can be handed to native code
         webView.addJavascriptInterface(new Git2AppDownloadBridge(), "Git2AppDownload");
+        // Lets the web app ask for a true full-screen window while Paystack checkout is open
+        webView.addJavascriptInterface(new SignalMeNativeBridge(), "SignalMeNative");
 
         // Native handler for any download the WebView triggers (content-disposition, <a download>, etc.)
         webView.setDownloadListener((url, userAgent, contentDisposition, mimetype, contentLength) -> {
@@ -185,7 +210,7 @@ public class MainActivity extends AppCompatActivity {
                 return true;
             }
             @Override
-            public void onPageStarted(WebView view, String url, Bitmap favicon) { }
+            public void onPageStarted(WebView view, String url, Bitmap favicon) { applyCheckoutFullscreen(false); }
             @Override
             public void onPageFinished(WebView view, String url) {
                 if (refreshLayout != null) refreshLayout.setRefreshing(false);
@@ -196,7 +221,7 @@ public class MainActivity extends AppCompatActivity {
                     + "m.setAttribute('content','width=device-width,initial-scale=1,maximum-scale=5,viewport-fit=cover');"
                     + "var s=document.getElementById('__git2app_fix');"
                     + "if(!s){s=document.createElement('style');s.id='__git2app_fix';"
-                    + "s.innerHTML='html,body{-webkit-text-size-adjust:100%!important;}img,video,iframe{max-width:100%!important;height:auto!important;}';"
+                    + "s.innerHTML='html,body{-webkit-text-size-adjust:100%!important;}img,video,iframe:not([src*=\"paystack\"]){max-width:100%!important;height:auto!important;}';"
                     + "document.head.appendChild(s);} "
                     + "}catch(e){}})();";
                 view.evaluateJavascript(viewportJs, null);
@@ -669,6 +694,8 @@ public class MainActivity extends AppCompatActivity {
             candidates = new String[] {
                 Manifest.permission.CAMERA,
                 Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
                 Manifest.permission.READ_MEDIA_AUDIO,
                 Manifest.permission.POST_NOTIFICATIONS
             };
@@ -871,6 +898,34 @@ public class MainActivity extends AppCompatActivity {
     // admob lifecycle disabled
 
 
+
+    /** Hide/show the system bars and drop/restore the window insets around the WebView. */
+    private void applyCheckoutFullscreen(boolean on) {
+        runOnUiThread(() -> {
+            if (checkoutFullscreen == on) return;
+            checkoutFullscreen = on;
+            try {
+                WindowInsetsControllerCompat c = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+                if (c != null) {
+                    if (on) {
+                        c.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                        c.hide(WindowInsetsCompat.Type.systemBars());
+                    } else {
+                        c.show(WindowInsetsCompat.Type.systemBars());
+                    }
+                }
+            } catch (Throwable ignored) {}
+            if (refreshLayout != null) refreshLayout.setEnabled(!on);
+            if (rootView != null) ViewCompat.requestApplyInsets(rootView);
+        });
+    }
+
+    private class SignalMeNativeBridge {
+        @android.webkit.JavascriptInterface
+        public void setCheckoutFullscreen(boolean on) {
+            applyCheckoutFullscreen(on);
+        }
+    }
 
     @Override
     public void onBackPressed() {
