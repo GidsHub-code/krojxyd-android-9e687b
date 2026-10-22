@@ -106,12 +106,12 @@ public class MainActivity extends AppCompatActivity {
         });
         refreshLayout = findViewById(R.id.refresh);
         webView = findViewById(R.id.webview);
-        // Only trigger pull-to-refresh when the WebView is actually at the top,
-        // so normal scrolling never gets hijacked into a reload.
-        refreshLayout.setOnRefreshListener(() -> webView.reload());
-        webView.getViewTreeObserver().addOnScrollChangedListener(() -> {
-            refreshLayout.setEnabled(!checkoutFullscreen && webView.getScrollY() == 0);
-        });
+        // Pull-to-refresh is disabled. SwipeRefreshLayout only sees the WebView's own scrollY,
+        // so when the page scrolls inside an inner container (e.g. the post-signal form/list)
+        // it kept thinking "at top" and stole every downward swipe, making scroll-up freeze.
+        refreshLayout.setOnRefreshListener(null);
+        refreshLayout.setEnabled(false);
+        webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
 
         createNotificationChannel();
         createDownloadNotificationChannel();
@@ -919,7 +919,6 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
             } catch (Throwable ignored) {}
-            if (refreshLayout != null) refreshLayout.setEnabled(!on);
             if (rootView != null) ViewCompat.requestApplyInsets(rootView);
         });
     }
