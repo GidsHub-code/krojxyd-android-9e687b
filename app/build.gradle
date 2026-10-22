@@ -18,7 +18,7 @@ android {
         applicationId "signalme.pl"
         minSdk 23
         targetSdk 36
-        versionCode 8.1
+        versionCode 9
         versionName "5.1"
 
         manifestPlaceholders = [
